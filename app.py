@@ -130,31 +130,65 @@ def normalize_sms_usage(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_voice_usage(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    col = COLS["voice_volume"]
-    # strip ":00" and convert to minutes; if empty, treat as 0
-    df[col] = (
-        df[col]
-        .astype(str)
-        .str.replace(":00", "", regex=False)
-        .str.strip()
-        .replace("", "0")
-        .astype(float)
+
+    # pick correct columns from the real file
+    iccid_col = COLS["voice_iccid"] if COLS["voice_iccid"] in df.columns else pick_first_existing_col(
+        df, CANDIDATES["iccid"], "ICCID (voice usage)"
     )
+    roaming_col = COLS["voice_roaming"] if COLS["voice_roaming"] in df.columns else pick_first_existing_col(
+        df, CANDIDATES["roaming"], "Roaming (voice usage)"
+    )
+    vol_col = COLS["voice_volume"] if COLS["voice_volume"] in df.columns else pick_first_existing_col(
+        df, CANDIDATES["voice_volume"], "Voice volume/minutes"
+    )
+
+    df[COLS["voice_iccid"]] = df[iccid_col]
+    df[COLS["voice_roaming"]] = df[roaming_col]
+
+    s = df[vol_col].astype(str).str.strip()
+
+    # Convert m:ss to decimal minutes (12:30 -> 12.5)
+    has_colon = s.str.contains(":", na=False)
+
+    minutes_plain = pd.to_numeric(s.where(~has_colon), errors="coerce").fillna(0)
+
+    parts = s.where(has_colon, "")
+    mm = pd.to_numeric(parts.str.split(":", expand=True)[0], errors="coerce").fillna(0)
+    ss = pd.to_numeric(parts.str.split(":", expand=True)[1], errors="coerce").fillna(0)
+    minutes_colon = mm + (ss / 60.0)
+
+    df[COLS["voice_volume"]] = minutes_plain.where(~has_colon, minutes_colon).astype(float)
     return df
+
 
 
 def normalize_data_usage(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    col = COLS["data_volume"]
-    df[col] = (
-        df[col]
+
+    iccid_col = COLS["data_iccid"] if COLS["data_iccid"] in df.columns else pick_first_existing_col(
+        df, CANDIDATES["iccid"], "ICCID (data usage)"
+    )
+    roaming_col = COLS["data_roaming"] if COLS["data_roaming"] in df.columns else pick_first_existing_col(
+        df, CANDIDATES["roaming"], "Roaming (data usage)"
+    )
+    vol_col = COLS["data_volume"] if COLS["data_volume"] in df.columns else pick_first_existing_col(
+        df, CANDIDATES["data_volume"], "Data volume"
+    )
+
+    df[COLS["data_iccid"]] = df[iccid_col]
+    df[COLS["data_roaming"]] = df[roaming_col]
+
+    df[COLS["data_volume"]] = (
+        df[vol_col]
         .astype(str)
         .str.replace(",", "")
         .str.strip()
         .replace("", "0")
         .astype(float)
     )
+
     return df
+
 
 
 def build_setup_devices(hacc_excel: pd.ExcelFile, pre_rdr_check_df: pd.DataFrame) -> pd.DataFrame:
