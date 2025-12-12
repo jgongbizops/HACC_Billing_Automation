@@ -68,6 +68,14 @@ CANDIDATES = {
     ],
 }
 
+def pick_first_existing_col(df: pd.DataFrame, candidates: list[str], label: str) -> str:
+    cols = list(df.columns)
+    colset = set(cols)
+    for c in candidates:
+        if c in colset:
+            return c
+    raise KeyError(f"Could not find {label} column. Available columns: {cols}")
+
 
 # ---------- HELPER FUNCTIONS ----------
 
