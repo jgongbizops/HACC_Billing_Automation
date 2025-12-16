@@ -899,11 +899,11 @@ if st.button("Generate Bill Detail + Invoice"):
         )
 
 if invoice_template is not None:
-    invoice_bytes = write_invoice_from_bill_detail_to_template(
-        bill_detail_df=bill_detail_df,
-        invoice_template_file=invoice_template,
-        summary_sheet_name="Summary",
-    )
+        invoice_bytes = write_invoice_from_bill_detail_to_template(
+            bill_detail_df=bill_detail_df,
+            invoice_template_file=invoice_template,
+            summary_sheet_name="Summary",
+        )
 
     st.download_button(
         label="Download Invoice Output (Summary filled)",
@@ -915,24 +915,25 @@ else:
     st.warning("Upload the Invoice Template to generate the Invoice output.")
 
 
-        st.success("Processing complete!")
+st.success("Processing complete!")
 
-        st.subheader("Preview: Bill Detail (first 20 rows)")
-        st.dataframe(bill_detail_df.head(20))
+st.subheader("Preview: Bill Detail (first 20 rows)")
+st.dataframe(bill_detail_df.head(20))
 
-        st.subheader("Preview: Invoice Summary")
-        st.dataframe(invoice_summary_df)
+st.subheader("Preview: Invoice Summary")
+st.dataframe(invoice_summary_df)
 
-        # Export to Excel in memory
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            bill_detail_df.to_excel(writer, sheet_name="Detail Bill", index=False)
-            invoice_summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        output.seek(0)
+# Export to Excel in memory
+output = io.BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    bill_detail_df.to_excel(writer, sheet_name="Detail Bill", index=False)
+    invoice_summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
-        st.download_button(
-            label="Download Bill Detail + Summary Excel",
-            data=output,
-            file_name="HACC_Billing_Output.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+output.seek(0)
+
+st.download_button(
+    label="Download Bill Detail + Summary Excel",
+    data=output,
+    file_name="Bill_Detail_and_Summary.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
