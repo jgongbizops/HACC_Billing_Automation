@@ -428,6 +428,326 @@ def build_invoice_summary(bill_detail_df: pd.DataFrame) -> pd.DataFrame:
 
     return summary
 
+def build_invoice_summary_from_bill_detail(bill_detail_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build invoice-summary numbers ONLY from Bill Detail.
+
+    Rules:
+    - # of Lines = unique ICCID count from base rows:
+        * Setup: Record Type == "TMS Service Setup"
+        * Enrolled (PPU): Record Type == "TMS Service Enrolled - Subscription"
+        * Enrolled (MRC): Record Type == "TMS Service Enrolled - MRC"
+    - Usage comes from usage breakdown rows:
+        * Setup usage: "TMS Service Setup - Usage Breakdown"
+        * PPU usage: "TMS Service Enrolled (PPU) - Usage breakdown"
+      Split by roaming zone Yes/No.
+    - Charges:
+        * Setup data non-roaming charge = MB * 0.0026
+        * Setup data roaming charge     = MB * 0.0053
+        * Setup voice/sms charge = 0
+        * PPU all usage charges = 0
+        * MRC total charges = sum(Subscription Charges)
+    """
+    if bill_detail_df is None or bill_detail_df.empty:
+        return pd.DataFrame()
+
+    df = bill_detail_df.copy()
+
+    # ---- Helpers ----
+    def safe_series(s):
+        return s.fillna("").astype(str).str.strip()
+
+    def nunique_iccid(sub):
+        if sub.empty:
+            return 0
+        return sub["ICCID"].nunique()
+
+    def sum_usage(sub, col):
+        if sub.empty or col not in sub.columns:
+            return 0.0
+        return float(pd.to_numeric(sub[col], errors="coerce").fillna(0).sum())
+
+    # Normalize Service labels a bit
+    if "Service" in df.columns:
+        df["Service"] = safe_series(df["Service"]).replace({"H": "Hyundai", "G": "Genesis"})
+    else:
+        df["Service"] = "Hyundai"
+
+    services = ["Hyundai", "Genesis"]
+
+    # ---- Base rows for line counts ----
+    setup_base = df[df["Record Type"] == "TMS Service Setup"]
+    ppu_base   = df[df["Record Type"] == "TMS Service Enrolled - Subscription"]
+    mrc_base   = df[df["Record Type"] == "TMS Service Enrolled - MRC"]
+
+    # ---- Usage breakdown rows ----
+    setup_usage = df[df["Record Type"] == "TMS Service Setup - Usage Breakdown"]
+    ppu_usage   = df[df["Record Type"] == "TMS Service Enrolled (PPU) - Usage breakdown"]
+
+    # ---- Rates ----
+    SETUP_NR_DATA_RATE = 0.0026
+    SETUP_R_DATA_RATE  = 0.0053
+
+    rows = []
+
+    for svc in services:
+        # Line counts (unique ICCIDs)
+        setup_lines = nunique_iccid(setup_base[setup_base["Service"] == svc])
+        ppu_lines   = nunique_iccid(ppu_base[ppu_base["Service"] == svc])
+        mrc_lines   = nunique_iccid(mrc_base[mrc_base["Service"] == svc])
+
+        # MRC charges (subscription)
+        mrc_sub = mrc_base[mrc_base["Service"] == svc]
+        mrc_total_charges = float(pd.to_numeric(mrc_sub.get("Subscription Charges", 0), errors="coerce").fillna(0).sum())
+
+        # ---- Setup usage splits ----
+        su = setup_usage[setup_usage["Service"] == svc]
+
+        su_data_nr = su[su.get("Data Roaming Zone", "") == "No"]
+        su_data_r  = su[su.get("Data Roaming Zone", "") == "Yes"]
+        su_sms_nr  = su[su.get("SMS Roaming Zone", "") == "No"]
+        su_sms_r   = su[su.get("SMS Roaming Zone", "") == "Yes"]
+        su_voice_nr= su[su.get("Voice Roaming Zone", "") == "No"]
+        su_voice_r = su[su.get("Voice Roaming Zone", "") == "Yes"]
+
+        setup_data_nr_mb = sum_usage(su_data_nr, "Data Usage (MB)")
+        setup_data_r_mb  = sum_usage(su_data_r,  "Data Usage (MB)")
+        setup_sms_nr_cnt = sum_usage(su_sms_nr,  "SMS Usage")
+        setup_sms_r_cnt  = sum_usage(su_sms_r,   "SMS Usage")
+        setup_voice_nr_m = sum_usage(su_voice_nr,"Voice Usage (Min)")
+        setup_voice_r_m  = sum_usage(su_voice_r, "Voice Usage (Min)")
+
+        setup_data_nr_charge = setup_data_nr_mb * SETUP_NR_DATA_RATE
+        setup_data_r_charge  = setup_data_r_mb  * SETUP_R_DATA_RATE
+
+        # ---- PPU usage splits (charges always 0) ----
+        pu = ppu_usage[ppu_usage["Service"] == svc]
+
+        pu_data_nr = pu[pu.get("Data Roaming Zone", "") == "No"]
+        pu_data_r  = pu[pu.get("Data Roaming Zone", "") == "Yes"]
+        pu_sms_nr  = pu[pu.get("SMS Roaming Zone", "") == "No"]
+        pu_sms_r   = pu[pu.get("SMS Roaming Zone", "") == "Yes"]
+        pu_voice_nr= pu[pu.get("Voice Roaming Zone", "") == "No"]
+        pu_voice_r = pu[pu.get("Voice Roaming Zone", "") == "Yes"]
+
+        ppu_data_nr_mb = sum_usage(pu_data_nr, "Data Usage (MB)")
+        ppu_data_r_mb  = sum_usage(pu_data_r,  "Data Usage (MB)")
+        ppu_sms_nr_cnt = sum_usage(pu_sms_nr,  "SMS Usage")
+        ppu_sms_r_cnt  = sum_usage(pu_sms_r,   "SMS Usage")
+        ppu_voice_nr_m = sum_usage(pu_voice_nr,"Voice Usage (Min)")
+        ppu_voice_r_m  = sum_usage(pu_voice_r, "Voice Usage (Min)")
+
+        # charges always 0 for PPU usage
+        ppu_data_nr_charge = 0.0
+        ppu_data_r_charge  = 0.0
+
+        # ---- Build rows in the style of your Summary (Record Type + Record Description) ----
+        # Setup - Data/SMS/Voice
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Setup",
+            "Record Description": "Data (MB)",
+            "# of Lines": setup_lines,
+            "Non-Roaming Usage": setup_data_nr_mb,
+            "Non-Roaming Charge": setup_data_nr_charge,
+            "Roaming Usage": setup_data_r_mb,
+            "Roaming Usage Charge": setup_data_r_charge,
+            "Total Charges": setup_data_nr_charge + setup_data_r_charge,
+        })
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Setup",
+            "Record Description": "SMS",
+            "# of Lines": setup_lines,
+            "Non-Roaming Usage": setup_sms_nr_cnt,
+            "Non-Roaming Charge": 0.0,
+            "Roaming Usage": setup_sms_r_cnt,
+            "Roaming Usage Charge": 0.0,
+            "Total Charges": 0.0,
+        })
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Setup",
+            "Record Description": "Voice",
+            "# of Lines": setup_lines,
+            "Non-Roaming Usage": setup_voice_nr_m,
+            "Non-Roaming Charge": 0.0,
+            "Roaming Usage": setup_voice_r_m,
+            "Roaming Usage Charge": 0.0,
+            "Total Charges": 0.0,
+        })
+
+        # Enrolled (MRC) - Subscription Charge
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Enrolled (MRC)",
+            "Record Description": "Subscription Charge",
+            "# of Lines": mrc_lines,
+            "Non-Roaming Usage": "",
+            "Non-Roaming Charge": "",
+            "Roaming Usage": "",
+            "Roaming Usage Charge": "",
+            "Total Charges": mrc_total_charges,
+        })
+
+        # Enrolled (PPU) - Data/SMS/Voice (charges always 0)
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Enrolled (PPU)",
+            "Record Description": "Data (MB)",
+            "# of Lines": ppu_lines,
+            "Non-Roaming Usage": ppu_data_nr_mb,
+            "Non-Roaming Charge": ppu_data_nr_charge,
+            "Roaming Usage": ppu_data_r_mb,
+            "Roaming Usage Charge": ppu_data_r_charge,
+            "Total Charges": 0.0,
+        })
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Enrolled (PPU)",
+            "Record Description": "SMS",
+            "# of Lines": ppu_lines,
+            "Non-Roaming Usage": ppu_sms_nr_cnt,
+            "Non-Roaming Charge": 0.0,
+            "Roaming Usage": ppu_sms_r_cnt,
+            "Roaming Usage Charge": 0.0,
+            "Total Charges": 0.0,
+        })
+        rows.append({
+            "Service": svc,
+            "Bill Cycle Month": df.get("Bill Cycle Month", pd.Series([""])).iloc[0] if "Bill Cycle Month" in df.columns else "",
+            "Record Type": "TMS Service Enrolled (PPU)",
+            "Record Description": "Voice",
+            "# of Lines": ppu_lines,
+            "Non-Roaming Usage": ppu_voice_nr_m,
+            "Non-Roaming Charge": 0.0,
+            "Roaming Usage": ppu_voice_r_m,
+            "Roaming Usage Charge": 0.0,
+            "Total Charges": 0.0,
+        })
+
+    # Return as DataFrame (you can write this into the invoice template Summary tab)
+    out = pd.DataFrame(rows)
+
+    # Optional: ensure numeric columns are numeric where applicable
+    for c in ["# of Lines", "Non-Roaming Usage", "Non-Roaming Charge", "Roaming Usage", "Roaming Usage Charge", "Total Charges"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="ignore")
+
+    return out
+
+from openpyxl import load_workbook
+
+def write_invoice_from_bill_detail_to_template(
+    bill_detail_df: pd.DataFrame,
+    invoice_template_file,
+    summary_sheet_name: str = "Summary",
+) -> io.BytesIO:
+    """
+    Fill Invoice Summary tab using Bill Detail.
+    Writes ONLY input cells (counts + usage).
+    Leaves Excel formulas intact.
+    """
+
+    df = bill_detail_df.copy()
+
+    # Normalize service
+    df["Service"] = (
+        df.get("Service", "Hyundai")
+        .fillna("Hyundai")
+        .astype(str).str.strip()
+        .replace({"H": "Hyundai", "G": "Genesis"})
+    )
+
+    def uniq_lines(sub):
+        return int(sub["ICCID"].nunique()) if not sub.empty else 0
+
+    def sum_col(sub, col):
+        if sub.empty or col not in sub.columns:
+            return 0
+        return float(pd.to_numeric(sub[col], errors="coerce").fillna(0).sum())
+
+    setup_base = df[df["Record Type"] == "TMS Service Setup"]
+    mrc_base   = df[df["Record Type"] == "TMS Service Enrolled - MRC"]
+    ppu_base   = df[df["Record Type"] == "TMS Service Enrolled - Subscription"]
+
+    setup_usage = df[df["Record Type"] == "TMS Service Setup - Usage Breakdown"]
+    ppu_usage   = df[df["Record Type"] == "TMS Service Enrolled (PPU) - Usage breakdown"]
+
+    def usage(svc, base, col, roam_col, flag):
+        sub = base[(base["Service"] == svc) & (base[roam_col] == flag)]
+        return sum_col(sub, col)
+
+    wb = load_workbook(invoice_template_file)
+    ws = wb[summary_sheet_name]
+
+    def setc(cell, val):
+        ws[cell].value = val
+
+    # ---------------- HYUNDAI ----------------
+    h_setup = uniq_lines(setup_base[setup_base["Service"] == "Hyundai"])
+    for c in ["E4", "E5", "E6"]:
+        setc(c, h_setup)
+
+    setc("H4", usage("Hyundai", setup_usage, "Data Usage (MB)", "Data Roaming Zone", "No"))
+    setc("K4", usage("Hyundai", setup_usage, "Data Usage (MB)", "Data Roaming Zone", "Yes"))
+    setc("H5", usage("Hyundai", setup_usage, "SMS Usage", "SMS Roaming Zone", "No"))
+    setc("K5", usage("Hyundai", setup_usage, "SMS Usage", "SMS Roaming Zone", "Yes"))
+    setc("H6", usage("Hyundai", setup_usage, "Voice Usage (Min)", "Voice Roaming Zone", "No"))
+    setc("K6", usage("Hyundai", setup_usage, "Voice Usage (Min)", "Voice Roaming Zone", "Yes"))
+
+    setc("E7", uniq_lines(mrc_base[mrc_base["Service"] == "Hyundai"]))
+
+    h_ppu = uniq_lines(ppu_base[ppu_base["Service"] == "Hyundai"])
+    for c in ["E8", "E9", "E10"]:
+        setc(c, h_ppu)
+
+    setc("H8", usage("Hyundai", ppu_usage, "Data Usage (MB)", "Data Roaming Zone", "No"))
+    setc("K8", usage("Hyundai", ppu_usage, "Data Usage (MB)", "Data Roaming Zone", "Yes"))
+    setc("H9", usage("Hyundai", ppu_usage, "SMS Usage", "SMS Roaming Zone", "No"))
+    setc("K9", usage("Hyundai", ppu_usage, "SMS Usage", "SMS Roaming Zone", "Yes"))
+    setc("H10", usage("Hyundai", ppu_usage, "Voice Usage (Min)", "Voice Roaming Zone", "No"))
+    setc("K10", usage("Hyundai", ppu_usage, "Voice Usage (Min)", "Voice Roaming Zone", "Yes"))
+
+    # ---------------- GENESIS ----------------
+    g_setup = uniq_lines(setup_base[setup_base["Service"] == "Genesis"])
+    for c in ["E14", "E15", "E16"]:
+        setc(c, g_setup)
+
+    setc("H14", usage("Genesis", setup_usage, "Data Usage (MB)", "Data Roaming Zone", "No"))
+    setc("K14", usage("Genesis", setup_usage, "Data Usage (MB)", "Data Roaming Zone", "Yes"))
+    setc("H15", usage("Genesis", setup_usage, "SMS Usage", "SMS Roaming Zone", "No"))
+    setc("K15", usage("Genesis", setup_usage, "SMS Usage", "SMS Roaming Zone", "Yes"))
+    setc("H16", usage("Genesis", setup_usage, "Voice Usage (Min)", "Voice Roaming Zone", "No"))
+    setc("K16", usage("Genesis", setup_usage, "Voice Usage (Min)", "Voice Roaming Zone", "Yes"))
+
+    setc("E17", uniq_lines(mrc_base[mrc_base["Service"] == "Genesis"]))
+
+    g_ppu = uniq_lines(ppu_base[ppu_base["Service"] == "Genesis"])
+    for c in ["E18", "E19", "E20"]:
+        setc(c, g_ppu)
+
+    setc("H18", usage("Genesis", ppu_usage, "Data Usage (MB)", "Data Roaming Zone", "No"))
+    setc("K18", usage("Genesis", ppu_usage, "Data Usage (MB)", "Data Roaming Zone", "Yes"))
+    setc("H19", usage("Genesis", ppu_usage, "SMS Usage", "SMS Roaming Zone", "No"))
+    setc("K19", usage("Genesis", ppu_usage, "SMS Usage", "SMS Roaming Zone", "Yes"))
+    setc("H20", usage("Genesis", ppu_usage, "Voice Usage (Min)", "Voice Roaming Zone", "No"))
+    setc("K20", usage("Genesis", ppu_usage, "Voice Usage (Min)", "Voice Roaming Zone", "Yes"))
+
+    # Force Excel to recalc formulas on open
+    wb.calculation.fullCalcOnLoad = True
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
 
 def process_hacc_billing(
     hacc_file,
@@ -525,7 +845,7 @@ def process_hacc_billing(
         ignore_index=True,
     )
 
-    invoice_summary = build_invoice_summary(bill_detail)
+    invoice_summary = build_invoice_summary_from_bill_detail(bill_detail)
 
     return bill_detail, invoice_summary
 
@@ -542,6 +862,8 @@ enrolled_ppu_check_file = st.file_uploader("enrolled-ppu_check_Sep25.xlsx", type
 data_usage_file = st.file_uploader("HAC_Data.xlsx", type=["xlsx"])
 sms_usage_file = st.file_uploader("HAC_SMS.xlsx", type=["xlsx"])
 voice_usage_file = st.file_uploader("HAC_Voice.xlsx", type=["xlsx"])
+invoice_template = st.file_uploader("Invoice Template (xlsx)", type=["xlsx"])
+
 
 col1, col2 = st.columns(2)
 with col1:
@@ -575,6 +897,23 @@ if st.button("Generate Bill Detail + Invoice"):
             bill_start,
             bill_end,
         )
+
+if invoice_template is not None:
+    invoice_bytes = write_invoice_from_bill_detail_to_template(
+        bill_detail_df=bill_detail_df,
+        invoice_template_file=invoice_template,
+        summary_sheet_name="Summary",
+    )
+
+    st.download_button(
+        label="Download Invoice Output (Summary filled)",
+        data=invoice_bytes,
+        file_name="Invoice_Output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+else:
+    st.warning("Upload the Invoice Template to generate the Invoice output.")
+
 
         st.success("Processing complete!")
 
