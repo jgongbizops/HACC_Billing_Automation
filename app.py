@@ -632,81 +632,61 @@ with col2:
     bill_end = st.date_input("Bill End Date", value=date(2025, 9, 30))
 
 if st.button("Generate Bill Detail + Invoice"):
-    missing = [
-        name for name, f in [
-            ("hacc_Sep25", hacc_file),
-            ("pre-rdr_check_Sep25", pre_rdr_check_file),
-            ("enrolled-ppu_check_Sep25", enrolled_ppu_check_file),
-            ("HAC_Data", data_usage_file),
-            ("HAC_SMS", sms_usage_file),
-            ("HAC_Voice", voice_usage_file),
-        ] if f is None
-    ]
 
+    missing = [...]
+    
     if missing:
-        st.error(f"Please upload: {', '.join(missing)}")
+        st.error(...)
     else:
-        bill_detail_df, invoice_summary_df = process_hacc_billing(
-            hacc_file,
-            pre_rdr_check_file,
-            enrolled_ppu_check_file,
-            data_usage_file,
-            sms_usage_file,
-            voice_usage_file,
-            bill_start,
-            bill_end,
-        )
+        # 1️⃣ create data
+        bill_detail_df, invoice_summary_df = process_hacc_billing(...)
 
-# ---- BILL DETAIL OUTPUT (template-based) ----
-if bill_detail_template is not None:
+        # 2️⃣ Bill Detail TEMPLATE output
+        if bill_detail_template is not None:
+            bill_detail_df["Service"] = bill_detail_df["Service"].replace({
+                "Hyundai": "H",
+                "Genesis": "G",
+            }).fillna("H")
 
-    # Convert Service to H / G for the Bill Detail template
-    bill_detail_df["Service"] = bill_detail_df["Service"].replace({
-        "Hyundai": "H",
-        "Genesis": "G",
-    }).fillna("H")
+            bill_detail_bytes = write_bill_detail_to_template(
+                bill_detail_df=bill_detail_df,
+                bill_detail_template_file=bill_detail_template,
+                sheet1="Detail Bill",
+                sheet2="Detail Bill 2",
+                start_row=2,
+            )
 
-    bill_detail_bytes = write_bill_detail_to_template(
-        bill_detail_df=bill_detail_df,
-        bill_detail_template_file=bill_detail_template,
-        sheet1="Detail Bill",
-        sheet2="Detail Bill 2",
-        start_row=2,
-    )
+            st.download_button(
+                label="Download Bill Detail Output (Template formatted)",
+                data=bill_detail_bytes,
+                file_name="Bill_Detail_Output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.warning("Upload the Bill Detail Template...")
 
-    st.download_button(
-        label="Download Bill Detail Output (Template formatted)",
-        data=bill_detail_bytes,
-        file_name="Bill_Detail_Output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        # 3️⃣ Invoice TEMPLATE output
+        if invoice_template is not None:
+            invoice_bytes = write_invoice_from_bill_detail_to_template(
+                bill_detail_df=bill_detail_df,
+                invoice_template_file=invoice_template,
+                summary_sheet_name="Summary",
+            )
 
-else:
-    st.warning("Upload the Bill Detail Template to generate the formatted Bill Detail output.")
+            st.download_button(
+                label="Download Invoice Output (Summary filled)",
+                data=invoice_bytes,
+                file_name="Invoice_Output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.warning("Upload the Invoice Template...")
 
+        # 4️⃣ UI feedback (ALWAYS last)
+        st.success("Processing complete!")
 
-# ---- INVOICE OUTPUT (template-based) ----
-if invoice_template is not None:
-    invoice_bytes = write_invoice_from_bill_detail_to_template(
-        bill_detail_df=bill_detail_df,
-        invoice_template_file=invoice_template,
-        summary_sheet_name="Summary",
-    )
+        st.subheader("Preview: Bill Detail (first 20 rows)")
+        st.dataframe(bill_detail_df.head(20))
 
-    st.download_button(
-        label="Download Invoice Output (Summary filled)",
-        data=invoice_bytes,
-        file_name="Invoice_Output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-else:
-    st.warning("Upload the Invoice Template to generate the Invoice output.")
-
-
-st.success("Processing complete!")
-
-st.subheader("Preview: Bill Detail (first 20 rows)")
-st.dataframe(bill_detail_df.head(20))
-
-st.subheader("Preview: Invoice Summary (preview table)")
-st.dataframe(invoice_summary_df)
+        st.subheader("Preview: Invoice Summary")
+        st.dataframe(invoice_summary_df)
