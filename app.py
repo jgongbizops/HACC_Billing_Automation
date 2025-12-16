@@ -427,6 +427,188 @@ def write_invoice_from_bill_detail_to_template(
     out.seek(0)
     return out
 
+from openpyxl import load_workbook
+
+BILL_DETAIL_COLS = [
+    "ID",
+    "Invoice Number",
+    "Bill Cycle Month",
+    "ICCID",
+    "VIN",
+    "MEID/IMEI",
+    "MDN/MSISDN",
+    "Service",
+    "Record Type",
+    "Voice Roaming Zone",
+    "SMS Roaming Zone",
+    "Data Roaming Zone",
+    "Bill Start Date",
+    "Bill End Date",
+    "Voice Usage (Min)",
+    "SMS Usage",
+    "Data Usage (MB)",
+    "Subscription Plan",
+    "Subscription Charges",
+]
+
+def write_bill_detail_to_template(bill_detail_df, bill_detail_template_file,
+                                 sheet1="Detail Bill", sheet2="Detail Bill 2",
+                                 start_row=2, max_rows_per_sheet=1_000_000):
+    """
+    Fills your Bill Detail TEMPLATE in the exact formatting:
+    - keeps headers, widths, styles
+    - clears old data from row 2+
+    - writes new rows copying the style from the template's first data row
+    - spills into 'Detail Bill 2' automatically
+    Returns BytesIO for download.
+    """
+    # --- Load template workbook ---
+    wb = load_workbook(bill_detail_template_file)
+    if sheet1 not in wb.sheetnames:
+        raise KeyError(f"Template is missing sheet: {sheet1}")
+    ws1 = wb[sheet1]
+
+    # Ensure sheet2 exists
+    if sheet2 not in wb.sheetnames:
+        wb.create_sheet(sheet2)
+    ws2 = wb[sheet2]
+
+    # --- Capture style row BEFORE clearing (row 2 in template) ---
+    def capture_row_style(ws, row_idx):
+        styles = []
+        for col_idx in range(1, len(BILL_DETAIL_COLS) + 1):
+            c = ws.cell(row=row_idx, column=col_idx)
+            styles.append({
+                "font": c.font,
+                "fill": c.fill,
+                "border": c.border,
+                "alignment": c.alignment,
+                "number_format": c.number_format,
+                "protection": c.protection,
+                "comment": c.comment,
+            })
+        return styles
+
+    style1 = capture_row_style(ws1, start_row)
+
+    # For ws2: if it's empty, copy header row + style row from ws1
+    if ws2.max_row < 2 or ws2.cell(1, 1).value is None:
+        # Copy header row values + styles
+        for col_idx in range(1, len(BILL_DETAIL_COLS) + 1):
+            src = ws1.cell(row=1, column=col_idx)
+            dst = ws2.cell(row=1, column=col_idx, value=src.value)
+            dst.font = src.font
+            dst.fill = src.fill
+            dst.border = src.border
+            dst.alignment = src.alignment
+            dst.number_format = src.number_format
+            dst.protection = src.protection
+
+        # Copy column widths
+        for col_letter, dim in ws1.column_dimensions.items():
+            ws2.column_dimensions[col_letter].width = dim.width
+
+        # Make sure style row exists to copy formatting
+        for col_idx in range(1, len(BILL_DETAIL_COLS) + 1):
+            dst = ws2.cell(row=start_row, column=col_idx)
+            s = style1[col_idx - 1]
+            dst.font = s["font"]
+            dst.fill = s["fill"]
+            dst.border = s["border"]
+            dst.alignment = s["alignment"]
+            dst.number_format = s["number_format"]
+            dst.protection = s["protection"]
+
+    style2 = capture_row_style(ws2, start_row)
+
+    # --- Clear old data (keep header row 1) ---
+    def clear_data(ws):
+        if ws.max_row >= start_row:
+            ws.delete_rows(start_row, ws.max_row - start_row + 1)
+        # recreate style row so we can copy formatting when writing
+        for col_idx in range(1, len(BILL_DETAIL_COLS) + 1):
+            ws.cell(row=start_row, column=col_idx)
+
+    clear_data(ws1)
+    clear_data(ws2)
+
+    # restore style rows
+    for col_idx in range(1, len(BILL_DETAIL_COLS) + 1):
+        c1 = ws1.cell(row=start_row, column=col_idx)
+        s1 = style1[col_idx - 1]
+        c1.font = s1["font"]
+        c1.fill = s1["fill"]
+        c1.border = s1["border"]
+        c1.alignment = s1["alignment"]
+        c1.number_format = s1["number_format"]
+        c1.protection = s1["protection"]
+
+        c2 = ws2.cell(row=start_row, column=col_idx)
+        s2 = style2[col_idx - 1]
+        c2.font = s2["font"]
+        c2.fill = s2["fill"]
+        c2.border = s2["border"]
+        c2.alignment = s2["alignment"]
+        c2.number_format = s2["number_format"]
+        c2.protection = s2["protection"]
+
+    # --- Ensure dataframe has all required columns in correct order ---
+    df = bill_detail_df.copy()
+    for col in BILL_DETAIL_COLS:
+        if col not in df.columns:
+            df[col] = ""  # safe default
+
+    df = df[BILL_DETAIL_COLS]
+
+    # --- Write rows, spilling into sheet2 ---
+    current_ws = ws1
+    current_style = style1
+    row_in_sheet = start_row
+    global_id = 1
+
+    for _, r in df.iterrows():
+        # decide which sheet
+        if (row_in_sheet - start_row) >= max_rows_per_sheet:
+            current_ws = ws2
+            current_style = style2
+            row_in_sheet = start_row
+
+        # write row
+        for col_idx, col_name in enumerate(BILL_DETAIL_COLS, start=1):
+            cell = current_ws.cell(row=row_in_sheet, column=col_idx)
+
+            # apply style
+            s = current_style[col_idx - 1]
+            cell.font = s["font"]
+            cell.fill = s["fill"]
+            cell.border = s["border"]
+            cell.alignment = s["alignment"]
+            cell.number_format = s["number_format"]
+            cell.protection = s["protection"]
+
+            # set value (special for ID)
+            if col_name == "ID":
+                cell.value = global_id
+            else:
+                v = r[col_name]
+                # Convert numpy to python scalars
+                if hasattr(v, "item"):
+                    v = v.item()
+                cell.value = v
+
+        row_in_sheet += 1
+        global_id += 1
+
+    # Force Excel to recalc on open (keeps formulas in template happy)
+    wb.calculation.fullCalcOnLoad = True
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
+
 # ---------------- STREAMLIT UI ----------------
 st.title("HACC Billing Automation (Bill Detail + Invoice Template Output)")
 
@@ -440,6 +622,8 @@ sms_usage_file = st.file_uploader("HAC_SMS.xlsx", type=["xlsx"])
 voice_usage_file = st.file_uploader("HAC_Voice.xlsx", type=["xlsx"])
 
 invoice_template = st.file_uploader("Invoice Template (xlsx) - Summary tab will be filled", type=["xlsx"])
+bill_detail_template = st.file_uploader("Bill Detail Template (xlsx)", type=["xlsx"])
+
 
 col1, col2 = st.columns(2)
 with col1:
@@ -473,39 +657,56 @@ if st.button("Generate Bill Detail + Invoice"):
             bill_end,
         )
 
-        # ----- INVOICE OUTPUT (template-based) -----
-        if invoice_template is not None:
-            invoice_bytes = write_invoice_from_bill_detail_to_template(
-                bill_detail_df=bill_detail_df,
-                invoice_template_file=invoice_template,
-                summary_sheet_name="Summary",
-            )
-            st.download_button(
-                label="Download Invoice Output (Summary filled)",
-                data=invoice_bytes,
-                file_name="Invoice_Output.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            st.warning("Upload the Invoice Template to generate the Invoice output.")
+# ---- BILL DETAIL OUTPUT (template-based) ----
+if bill_detail_template is not None:
 
-        # ----- BILL DETAIL OUTPUT (simple export) -----
-        bill_out = io.BytesIO()
-        with pd.ExcelWriter(bill_out, engine="openpyxl") as writer:
-            bill_detail_df.to_excel(writer, sheet_name="Detail Bill", index=False)
-        bill_out.seek(0)
+    # Convert Service to H / G for the Bill Detail template
+    bill_detail_df["Service"] = bill_detail_df["Service"].replace({
+        "Hyundai": "H",
+        "Genesis": "G",
+    }).fillna("H")
 
-        st.download_button(
-            label="Download Bill Detail Output (Excel)",
-            data=bill_out,
-            file_name="Bill_Detail_Output.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    bill_detail_bytes = write_bill_detail_to_template(
+        bill_detail_df=bill_detail_df,
+        bill_detail_template_file=bill_detail_template,
+        sheet1="Detail Bill",
+        sheet2="Detail Bill 2",
+        start_row=2,
+    )
 
-        st.success("Processing complete!")
+    st.download_button(
+        label="Download Bill Detail Output (Template formatted)",
+        data=bill_detail_bytes,
+        file_name="Bill_Detail_Output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
-        st.subheader("Preview: Bill Detail (first 20 rows)")
-        st.dataframe(bill_detail_df.head(20))
+else:
+    st.warning("Upload the Bill Detail Template to generate the formatted Bill Detail output.")
 
-        st.subheader("Preview: Invoice Summary (preview table)")
-        st.dataframe(invoice_summary_df)
+
+# ---- INVOICE OUTPUT (template-based) ----
+if invoice_template is not None:
+    invoice_bytes = write_invoice_from_bill_detail_to_template(
+        bill_detail_df=bill_detail_df,
+        invoice_template_file=invoice_template,
+        summary_sheet_name="Summary",
+    )
+
+    st.download_button(
+        label="Download Invoice Output (Summary filled)",
+        data=invoice_bytes,
+        file_name="Invoice_Output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+else:
+    st.warning("Upload the Invoice Template to generate the Invoice output.")
+
+
+st.success("Processing complete!")
+
+st.subheader("Preview: Bill Detail (first 20 rows)")
+st.dataframe(bill_detail_df.head(20))
+
+st.subheader("Preview: Invoice Summary (preview table)")
+st.dataframe(invoice_summary_df)
