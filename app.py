@@ -1,3 +1,12 @@
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Workbook contains no default style, apply openpyxl's default",
+    category=UserWarning,
+    module=r"openpyxl\..*",
+)
+
 import io
 from datetime import date
 from typing import List, Dict, Optional, Tuple
